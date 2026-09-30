@@ -111,23 +111,53 @@ class TestPeiraDemonGate(unittest.TestCase):
             organism.coris = type(organism.coris)(immune_store_path=os.path.join(self.workspace, "immune_memory.json"))
         return organism
 
-    def _run_organism(self, organism, command):
-        traces = [{"id": "B1", "name": "Trace", "code": command, "entropies": [0.1]}]
+    def _run_organism(self, organism, command, traces=None, retries=0):
+        traces = traces or [{"id": "B1", "name": "Trace", "code": command, "entropies": [0.1]}]
         return organism.execute_hexad_lifecycle(
             intent_query="Verify gate",
             workspace_dir=self.workspace,
             candidate_reasoning_traces=traces,
             context_conversation=[],
-            max_fracture_retries=0
+            max_fracture_retries=retries
         )
 
     def test_organism_gate_blocks_before_peira(self):
-        """Un comando bloccato da DEMON non raggiunge mai PEIRA nell'organismo."""
+        """Un comando bloccato da DEMON non raggiunge mai PEIRA e il ramo viene escluso."""
         # Innocuo se eseguito (è solo un echo), ma riconosciuto dal gate come distruzione di database
-        res = self._run_organism(self._organism(), "echo DROP TABLE users")
-        self.assertEqual(res["lifecycle_status"], "BLOCKED_BY_DEMON")
-        self.assertIn("database_destruction", res["matched_rules"])
+        res = self._run_organism(self._organism(), "echo DROP TABLE users", retries=1)
+        self.assertEqual(res["lifecycle_status"], "HEXAD_HALTED_NO_ALTERNATIVES")
+        self.assertEqual(res["excluded_branches"], ["B1"])
+        self.assertTrue(any("Gate BLOCK" in line and "database" in line for line in res["audit_trail"]))
         self.assertFalse(any("[6. PEIRA]" in line for line in res["audit_trail"]))
+
+    def test_organism_blocked_branch_falls_back_to_safe_one(self):
+        """Dopo un blocco DEMON l'organismo prova il ramo alternativo invece di arrendersi."""
+        traces = [
+            {"id": "RISKY", "code": "echo DROP TABLE users", "entropies": [0.1]},
+            {"id": "SAFE", "code": "python -c \"print('SAFE PATH')\"", "entropies": [0.3]},
+        ]
+        res = self._run_organism(self._organism(), None, traces=traces, retries=1)
+        self.assertEqual(res["lifecycle_status"], "HEXAD_ABSOLUTE_CONVERGENCE")
+        self.assertIn("SAFE PATH", res["physical_stdout"])
+
+    def test_organism_excludes_the_winner_not_the_first(self):
+        """La frattura esclude il ramo eletto da ANIMA, anche se non è il primo della lista."""
+        traces = [
+            {"id": "GOOD", "code": "python -c \"print('GOOD BRANCH')\"", "entropies": [0.3]},
+            {"id": "BROKEN", "code": "python -c \"import sys; sys.exit(3)\"", "entropies": [0.1]},
+        ]
+        res = self._run_organism(self._organism(), None, traces=traces, retries=1)
+        self.assertEqual(res["lifecycle_status"], "HEXAD_ABSOLUTE_CONVERGENCE")
+        self.assertIn("GOOD BRANCH", res["physical_stdout"])
+        self.assertEqual(res["cycles_required"], 2)
+
+    def test_organism_single_failure_is_not_reported_as_success(self):
+        """Un unico ramo fallito si arresta con la frattura, senza eseguire un comando segnaposto."""
+        traces = [{"id": "ONLY", "code": "python -c \"import sys; sys.exit(3)\"", "entropies": [0.1]}]
+        res = self._run_organism(self._organism(), None, traces=traces, retries=1)
+        self.assertEqual(res["lifecycle_status"], "HEXAD_HALTED_NO_ALTERNATIVES")
+        self.assertEqual(res["last_fracture"]["exit_code"], 3)
+        self.assertEqual(sum("[6. PEIRA] Impatto fisico" in line for line in res["audit_trail"]), 1)
 
     def test_organism_fail_closed_without_gate(self):
         """Senza gate l'organismo nega l'esecuzione invece di dichiarare una barriera inesistente."""

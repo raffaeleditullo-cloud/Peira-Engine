@@ -95,6 +95,18 @@ class LivingHexadOrganism:
         audit_log = []
         current_query = intent_query
         retries_used = 0
+        # Rami bloccati da DEMON o fratturati da PEIRA: esclusi per id dai passi successivi
+        excluded_branches: List[str] = []
+        last_fracture: Optional[Dict[str, Any]] = None
+
+        if not candidate_reasoning_traces:
+            audit_log.append("[3. ANIMA] Nessun ramo candidato fornito: nessuna azione da eseguire.")
+            return {
+                "lifecycle_status": "HEXAD_NO_CANDIDATES",
+                "cycles_required": 0,
+                "audit_trail": audit_log,
+                "total_latency_ms": round((time.perf_counter() - start_time) * 1000.0, 3)
+            }
 
         while retries_used <= max_fracture_retries:
             cycle_label = f"Pass {retries_used + 1}"
@@ -138,26 +150,35 @@ class LivingHexadOrganism:
             # -------------------------------------------------------------
             # 3. ANIMA: Path Integral Minimization
             # -------------------------------------------------------------
-            action_intent = current_query
-            chosen_command = "python -c \"print('Verification passed')\""
-            action_val = 0.25
+            remaining = [
+                (r.get("id") or f"trace_{t_idx}", r)
+                for t_idx, r in enumerate(candidate_reasoning_traces)
+                if (r.get("id") or f"trace_{t_idx}") not in excluded_branches
+            ]
+            if not remaining:
+                audit_log.append(f"[3. ANIMA] Nessun ramo residuo (esclusi: {', '.join(excluded_branches)}). Arresto del ciclo.")
+                return self._halted_lifecycle_result(retries_used, excluded_branches, last_fracture, audit_log, start_time)
 
-            if self.anima and candidate_reasoning_traces:
+            action_val = 0.25
+            if self.anima:
                 branches = []
-                for r in candidate_reasoning_traces:
-                    b = AnimaBranch(id=r.get("id"), name=r.get("name", r.get("id")), metadata=r)
+                for b_id, r in remaining:
+                    b = AnimaBranch(id=b_id, name=r.get("name", b_id), metadata=r)
                     for idx, ent in enumerate(r.get("entropies", [0.15])):
                         self.anima.ingest_step(b, token=f"tok_{idx}", token_entropy=float(ent))
                     branches.append(b)
 
                 res = self.anima.collapse(current_query, branches)
                 winner = res.eigenstate
-                action_intent = winner.metadata.get("intent", current_query)
-                chosen_command = winner.metadata.get("code", chosen_command)
+                chosen_branch_id, chosen_trace = winner.id, winner.metadata
                 action_val = float(res.total_system_action)
                 audit_log.append(f"[3. ANIMA] Collasso su '{winner.name}' (Azione={action_val:.4f})")
             else:
-                audit_log.append(f"[3. ANIMA] Traiettoria variazionale standard (S={action_val:.4f})")
+                # Senza ANIMA: ordine dei candidati, deterministico
+                chosen_branch_id, chosen_trace = remaining[0]
+                audit_log.append(f"[3. ANIMA] Motore assente: selezione ordinale del ramo '{chosen_branch_id}'")
+            action_intent = chosen_trace.get("intent", current_query)
+            chosen_command = chosen_trace.get("code") or chosen_trace.get("command") or ""
 
             # -------------------------------------------------------------
             # 4. MNEME: Lyapunov Stability Certification
@@ -190,19 +211,13 @@ class LivingHexadOrganism:
                     f"[5. DEMON] Gate BLOCK su '{chosen_command}': {'; '.join(verdict.reasons)} "
                     f"(regole: {', '.join(verdict.matched_rules)})"
                 )
-                return {
-                    "lifecycle_status": "BLOCKED_BY_DEMON",
-                    "reason": verdict.reasons,
-                    "matched_rules": verdict.matched_rules,
-                    "audit_trail": audit_log,
-                    "total_latency_ms": round((time.perf_counter() - start_time) * 1000.0, 3)
-                }
+                # Il ramo bloccato esce dalla sovrapposizione; si prova l'alternativa successiva
+                excluded_branches.append(chosen_branch_id)
+                retries_used += 1
+                continue
+            # Il gateway vocale (route_command) non è invocato qui: invierebbe il comando alla
+            # ricerca web o eseguirebbe le proprie ipotesi predefinite, senza influire sul verdetto
             audit_log.append(f"[5. DEMON] Gate ALLOW ({verdict.latency_ms:.3f} ms)")
-
-            # 5b. DEMON: Muscle & Sandbox OS Actuation (telemetria del gateway)
-            if self.demon:
-                demon_res = self.demon.route_command(chosen_command)
-                audit_log.append(f"[5. DEMON] Transizione all'OS Gateway: '{demon_res.get('status')}'")
 
             # -------------------------------------------------------------
             # 6. PEIRA: Physical Silicon Crucible & Friction Delta
@@ -244,9 +259,17 @@ class LivingHexadOrganism:
             current_query = injection.target_fovea_query
             audit_log.append(f"[PEIRA -> OCULUS] Reset foveale forzato sulla query di crash: '{current_query}'")
 
-            # Se ci sono altri candidati, scarta il ramo che ha causato il crash
-            if candidate_reasoning_traces:
-                candidate_reasoning_traces = candidate_reasoning_traces[1:]
+            last_fracture = {
+                "command": impact.command,
+                "exit_code": impact.exit_code,
+                "delta_empirico": impact.delta_empirico,
+                "fault_epicenter": injection.fault_epicenter,
+                "diagnostic_summary": injection.diagnostic_summary
+            }
+
+            # Scarta il ramo che ha causato il crash (il vincitore di ANIMA, non il primo della lista)
+            excluded_branches.append(chosen_branch_id)
+            audit_log.append(f"[3. ANIMA] Ramo '{chosen_branch_id}' escluso (azione lagrangiana infinita).")
 
             retries_used += 1
 
@@ -254,9 +277,29 @@ class LivingHexadOrganism:
         return {
             "lifecycle_status": "HEXAD_MAX_RETRIES_EXCEEDED",
             "cycles_required": retries_used,
-            "last_delta": impact.delta_empirico,
+            "excluded_branches": excluded_branches,
+            "last_fracture": last_fracture,
+            "last_delta": last_fracture["delta_empirico"] if last_fracture else None,
             "audit_trail": audit_log,
             "total_latency_ms": round(total_ms, 3)
+        }
+
+    def _halted_lifecycle_result(
+        self,
+        cycles_used: int,
+        excluded_branches: List[str],
+        last_fracture: Optional[Dict[str, Any]],
+        audit_log: List[str],
+        start_time: float
+    ) -> Dict[str, Any]:
+        """Esito di arresto: nessuna alternativa residua, la frattura torna al chiamante."""
+        return {
+            "lifecycle_status": "HEXAD_HALTED_NO_ALTERNATIVES",
+            "cycles_required": cycles_used,
+            "excluded_branches": excluded_branches,
+            "last_fracture": last_fracture,
+            "audit_trail": audit_log,
+            "total_latency_ms": round((time.perf_counter() - start_time) * 1000.0, 3)
         }
 
 
@@ -266,10 +309,11 @@ if __name__ == "__main__":
     sample_context = [
         {"role": "system", "content": "You are the complete living closed-loop AI organism."}
     ]
-    # Iniziamo con un ramo volutamente rotto per dimostrare l'Iniezione di Frattura e auto-riparazione
+    # Iniziamo con un ramo volutamente rotto per dimostrare l'Iniezione di Frattura e auto-riparazione:
+    # B1 ha l'azione minima, quindi ANIMA lo elegge per primo; dopo la frattura resta B2
     sample_branches = [
-        {"id": "B1", "name": "Broken DivZero Trial", "code": "python -c \"import sys; sys.stderr.write('File \\\"test.py\\\", line 10, in run\\nZeroDivisionError: div 0\\n'); sys.exit(1)\"", "entropies": [0.15]},
-        {"id": "B2", "name": "Fixed Silicon Verification", "code": "python -c \"print('ALL TESTS PASSED: SILICON CONVERGENCE ACHIEVED')\"", "entropies": [0.10]}
+        {"id": "B1", "name": "Broken DivZero Trial", "code": "python -c \"import sys; sys.stderr.write('File \\\"test.py\\\", line 10, in run\\nZeroDivisionError: div 0\\n'); sys.exit(1)\"", "entropies": [0.10]},
+        {"id": "B2", "name": "Fixed Silicon Verification", "code": "python -c \"print('ALL TESTS PASSED: SILICON CONVERGENCE ACHIEVED')\"", "entropies": [0.15]}
     ]
 
     res = organism.execute_hexad_lifecycle(
