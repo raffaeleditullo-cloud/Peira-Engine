@@ -26,7 +26,7 @@ for eng in ["Oculus-Engine", "Anima-Engine", "Coris-Engine", "Demon-Engine", "Mn
     if os.path.exists(ep) and ep not in sys.path:
         sys.path.insert(0, ep)
 
-from peira_engine import PeiraEngine, EmpiricalImpact, FractureInjectionPayload
+from peira_engine import PeiraEngine, EmpiricalImpact, FractureInjectionPayload, classify_fracture
 
 try:
     from oculus_engine import OculusEngine
@@ -97,6 +97,8 @@ class LivingHexadOrganism:
         retries_used = 0
         # Rami bloccati da DEMON o fratturati da PEIRA: esclusi per id dai passi successivi
         excluded_branches: List[str] = []
+        # Un solo nuovo tentativo per ramo quando la frattura è transitoria (rete, timeout)
+        transient_retries: Dict[str, int] = {}
         last_fracture: Optional[Dict[str, Any]] = None
 
         if not candidate_reasoning_traces:
@@ -267,9 +269,16 @@ class LivingHexadOrganism:
                 "diagnostic_summary": injection.diagnostic_summary
             }
 
-            # Scarta il ramo che ha causato il crash (il vincitore di ANIMA, non il primo della lista)
-            excluded_branches.append(chosen_branch_id)
-            audit_log.append(f"[3. ANIMA] Ramo '{chosen_branch_id}' escluso (azione lagrangiana infinita).")
+            fracture_kind = classify_fracture(impact)
+            last_fracture["fracture_kind"] = fracture_kind
+            if fracture_kind == "TRANSIENT" and transient_retries.get(chosen_branch_id, 0) < 1:
+                # Ambiente instabile, non logica sbagliata: il ramo resta in gioco per un altro tentativo
+                transient_retries[chosen_branch_id] = 1
+                audit_log.append(f"[6. PEIRA] Frattura transitoria: il ramo '{chosen_branch_id}' verrà ritentato una volta.")
+            else:
+                # Scarta il ramo che ha causato il crash (il vincitore di ANIMA, non il primo della lista)
+                excluded_branches.append(chosen_branch_id)
+                audit_log.append(f"[3. ANIMA] Ramo '{chosen_branch_id}' escluso (azione lagrangiana infinita).")
 
             retries_used += 1
 

@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import shutil
 from unittest import mock
-from peira_engine import PeiraEngine, EmpiricalImpact, FractureInjectionPayload
+from peira_engine import PeiraEngine, EmpiricalImpact, FractureInjectionPayload, classify_fracture
 import peira_hexad_organism
 
 
@@ -94,6 +94,40 @@ PermissionError: Access denied
         self.assertEqual(res_fail.error_type, "ModuleNotFoundError")
 
 
+# Fallisce con un errore di rete la prima volta, riesce la seconda (usa un file marcatore)
+FLAKY_SCRIPT = "\n".join([
+    "import os, sys",
+    "if not os.path.exists('marker'):",
+    "    open('marker', 'w').close()",
+    "    sys.stderr.write('ConnectionResetError: peer reset')",
+    "    sys.exit(1)",
+    "print('FLAKY OK')",
+]) + "\n"
+
+
+class TestFractureClassification(unittest.TestCase):
+    def setUp(self):
+        self.engine = PeiraEngine(timeout_sec=5.0)
+
+    def test_transient_signals(self):
+        """Rete, timeout e servizi indisponibili sono fratture transitorie."""
+        for code, err in [(1, "ConnectionResetError: peer reset"), (124, "TIMEOUT EXPIRED"),
+                          (1, "urllib.error.HTTPError: HTTP Error 503 Service Unavailable"),
+                          (1, "Temporary failure in name resolution")]:
+            with self.subTest(err=err):
+                impact = self.engine.evaluate_physical_result("cmd", code, stderr=err)
+                self.assertEqual(classify_fracture(impact), "TRANSIENT")
+
+    def test_logic_failures_are_deterministic(self):
+        """Asserzioni, errori di nome e di sintassi non vengono mai ritentati."""
+        for err in ['File "t.py", line 3\nAssertionError: 40 != 22', "NameError: name 'x' is not defined",
+                    "SyntaxError: invalid syntax", ""]:
+            with self.subTest(err=err):
+                impact = self.engine.evaluate_physical_result("cmd", 1, stderr=err)
+                self.assertEqual(classify_fracture(impact), "DETERMINISTIC")
+        self.assertEqual(classify_fracture(self.engine.evaluate_physical_result("cmd", 0)), "CONVERGED")
+
+
 class TestPeiraDemonGate(unittest.TestCase):
     """Verifica che ogni ingresso verso PEIRA passi dal gate DEMON (fail-closed)."""
 
@@ -150,6 +184,16 @@ class TestPeiraDemonGate(unittest.TestCase):
         self.assertEqual(res["lifecycle_status"], "HEXAD_ABSOLUTE_CONVERGENCE")
         self.assertIn("GOOD BRANCH", res["physical_stdout"])
         self.assertEqual(res["cycles_required"], 2)
+
+    def test_organism_transient_fracture_retried_once(self):
+        """L'organismo ritenta una volta un ramo caduto per un errore di rete."""
+        with open(os.path.join(self.workspace, "flaky.py"), "w", encoding="utf-8") as f:
+            f.write(FLAKY_SCRIPT)
+        traces = [{"id": "FLAKY", "code": "python flaky.py", "entropies": [0.1]}]
+        res = self._run_organism(self._organism(), None, traces=traces, retries=2)
+        self.assertEqual(res["lifecycle_status"], "HEXAD_ABSOLUTE_CONVERGENCE")
+        self.assertEqual(res["cycles_required"], 2)
+        self.assertIn("FLAKY OK", res["physical_stdout"])
 
     def test_organism_single_failure_is_not_reported_as_success(self):
         """Un unico ramo fallito si arresta con la frattura, senza eseguire un comando segnaposto."""

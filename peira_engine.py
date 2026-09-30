@@ -255,3 +255,44 @@ class PeiraEngine:
         err_type = "CommandNonZeroExit"
         raw_tb = stderr[-200:].strip() if stderr else stdout[-200:].strip()
         return None, None, err_type, raw_tb
+
+
+# =============================================================================
+# CLASSIFICAZIONE DELLA FRATTURA: transitoria (ambiente) o deterministica (logica)
+# =============================================================================
+# Un ramo che fallisce per rete, timeout o risorse momentaneamente indisponibili può
+# essere corretto: escluderlo per sempre dopo un solo tentativo scarterebbe una soluzione
+# valida. Un'asserzione o un errore di sintassi, invece, si ripeterebbero identici.
+TRANSIENT_ERROR_TYPES = {
+    "TimeoutError", "ConnectionError", "ConnectionResetError", "ConnectionRefusedError",
+    "ConnectionAbortedError", "BrokenPipeError", "InterruptedError", "BlockingIOError",
+}
+TRANSIENT_MARKERS = (
+    "temporary failure in name resolution", "timed out", "etimedout", "econnreset",
+    "econnrefused", "503 service unavailable", "502 bad gateway", "504 gateway timeout",
+    "429 too many requests", "resource temporarily unavailable", "text file busy",
+    "the process cannot access the file because it is being used by another process",
+)
+TIMEOUT_EXIT_CODE = 124
+
+
+def classify_fracture(impact: EmpiricalImpact) -> str:
+    """
+    Ritorna "CONVERGED", "TRANSIENT" o "DETERMINISTIC".
+    TRANSIENT solo per segnali espliciti di ambiente instabile; nel dubbio DETERMINISTIC,
+    così un fallimento logico non viene mai ripetuto alla cieca.
+    """
+    if impact.is_converged:
+        return "CONVERGED"
+    if impact.exit_code == TIMEOUT_EXIT_CODE:
+        return "TRANSIENT"
+    if impact.error_type in TRANSIENT_ERROR_TYPES:
+        return "TRANSIENT"
+    raw = f"{impact.stderr}\n{impact.stdout}"
+    # Riga d'eccezione anche senza traceback completo, es. "ConnectionResetError: peer reset"
+    if re.search(r"\b(" + "|".join(sorted(TRANSIENT_ERROR_TYPES)) + r")\s*:", raw):
+        return "TRANSIENT"
+    text = raw.lower()
+    if any(marker in text for marker in TRANSIENT_MARKERS):
+        return "TRANSIENT"
+    return "DETERMINISTIC"
