@@ -195,6 +195,14 @@ class TestPeiraDemonGate(unittest.TestCase):
         self.assertEqual(res["cycles_required"], 2)
         self.assertIn("FLAKY OK", res["physical_stdout"])
 
+    def test_organism_author_override(self):
+        """L'organismo esegue un comando bloccato solo con l'override esplicito dell'autore."""
+        traces = [{"id": "DROP_ECHO", "code": "echo DROP TABLE users", "entropies": [0.1]}]
+        res = self._organism().execute_hexad_lifecycle(
+            "step", self.workspace, traces, [], max_fracture_retries=1,
+            authorized_overrides=["database_destruction"])
+        self.assertEqual(res["lifecycle_status"], "HEXAD_ABSOLUTE_CONVERGENCE")
+
     def test_organism_single_failure_is_not_reported_as_success(self):
         """Un unico ramo fallito si arresta con la frattura, senza eseguire un comando segnaposto."""
         traces = [{"id": "ONLY", "code": "python -c \"import sys; sys.exit(3)\"", "entropies": [0.1]}]
@@ -218,16 +226,19 @@ class TestPeiraDemonGate(unittest.TestCase):
         self.assertEqual(res["lifecycle_status"], "HEXAD_ABSOLUTE_CONVERGENCE")
         self.assertIn("GATE ALLOW OK", res["physical_stdout"])
 
-    def _call_mcp_trial(self, command):
+    def _call_mcp_trial(self, command, env_overrides=None, extra_args=None):
         server = os.path.join(os.path.dirname(os.path.abspath(__file__)), "peira_mcp.py")
+        arguments = {"command": command, "cwd": self.workspace, **(extra_args or {})}
         request = {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "peira_execute_sandboxed_trial",
-                       "arguments": {"command": command, "cwd": self.workspace}}
+            "params": {"name": "peira_execute_sandboxed_trial", "arguments": arguments}
         }
+        env = {k: v for k, v in os.environ.items() if k != "HEXAD_AUTHORIZED_OVERRIDE_RULES"}
+        if env_overrides is not None:
+            env["HEXAD_AUTHORIZED_OVERRIDE_RULES"] = env_overrides
         proc = subprocess.run(
             [sys.executable, server], input=json.dumps(request) + "\n",
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=30, env=env
         )
         response = json.loads(proc.stdout.strip().splitlines()[0])
         return response["result"], json.loads(response["result"]["content"][0]["text"])
@@ -238,6 +249,17 @@ class TestPeiraDemonGate(unittest.TestCase):
         self.assertTrue(result.get("isError"))
         self.assertFalse(payload["execution_occurred"])
         self.assertIn("database_destruction", payload["matched_rules"])
+
+    def test_mcp_override_comes_from_server_env_only(self):
+        """L'override vale se configurato nell'ambiente del server, non se l'agente lo passa come argomento."""
+        result, payload = self._call_mcp_trial(
+            "echo DROP TABLE users", extra_args={"authorized_overrides": ["database_destruction"]})
+        self.assertTrue(result.get("isError"))
+        self.assertFalse(payload["execution_occurred"])
+
+        result, payload = self._call_mcp_trial("echo DROP TABLE users", env_overrides="database_destruction")
+        self.assertNotIn("isError", result)
+        self.assertEqual(payload["exit_code"], 0)
 
     def test_mcp_trial_allowed_executes(self):
         """Lo strumento MCP esegue i comandi ammessi dal gate."""

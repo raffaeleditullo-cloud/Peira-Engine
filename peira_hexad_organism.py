@@ -85,11 +85,16 @@ class LivingHexadOrganism:
         workspace_dir: str,
         candidate_reasoning_traces: List[Dict[str, Any]],
         context_conversation: List[Dict[str, Any]],
-        max_fracture_retries: int = 1
+        max_fracture_retries: int = 1,
+        authorized_overrides: Optional[List[Any]] = None
     ) -> Dict[str, Any]:
         """
         Esegue il ciclo cibernetico ad anello chiuso. Se PEIRA rileva frattura (Delta != 0),
         esegue l'iniezione retroattiva su OCULUS e CORIS per un nuovo tentativo corretto.
+
+        authorized_overrides: regole del gate DEMON sospese esplicitamente dall'autore umano
+        (id di regola, o {"rule": id, "command": comando_esatto}); le regole catastrofiche
+        restano bloccate. Non va mai popolato con valori scelti dall'agente.
         """
         start_time = time.perf_counter()
         audit_log = []
@@ -207,7 +212,8 @@ class LivingHexadOrganism:
                     "audit_trail": audit_log,
                     "total_latency_ms": round((time.perf_counter() - start_time) * 1000.0, 3)
                 }
-            verdict = demon_action_verdict(chosen_command, workspace_dir=workspace_dir)
+            verdict = demon_action_verdict(chosen_command, workspace_dir=workspace_dir,
+                                           authorized_overrides=authorized_overrides)
             if not verdict.allowed:
                 audit_log.append(
                     f"[5. DEMON] Gate BLOCK su '{chosen_command}': {'; '.join(verdict.reasons)} "
@@ -219,7 +225,10 @@ class LivingHexadOrganism:
                 continue
             # Il gateway vocale (route_command) non è invocato qui: invierebbe il comando alla
             # ricerca web o eseguirebbe le proprie ipotesi predefinite, senza influire sul verdetto
-            audit_log.append(f"[5. DEMON] Gate ALLOW ({verdict.latency_ms:.3f} ms)")
+            if verdict.overridden_rules:
+                audit_log.append(f"[5. DEMON] Gate ALLOW con override dell'autore: {', '.join(verdict.overridden_rules)}")
+            else:
+                audit_log.append(f"[5. DEMON] Gate ALLOW ({verdict.latency_ms:.3f} ms)")
 
             # -------------------------------------------------------------
             # 6. PEIRA: Physical Silicon Crucible & Friction Delta

@@ -25,7 +25,7 @@ _demon_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Demo
 if os.path.exists(_demon_dir) and _demon_dir not in sys.path:
     sys.path.insert(0, _demon_dir)
 try:
-    from demon_action_gate import evaluate_command as demon_action_verdict
+    from demon_action_gate import evaluate_command as demon_action_verdict, overrides_from_env
     HAS_DEMON_GATE = True
 except ImportError:
     HAS_DEMON_GATE = False
@@ -163,7 +163,9 @@ def main():
                             "reason": "DEMON_GATE_UNAVAILABLE: esecuzione negata (fail-closed)."
                         }
                     else:
-                        verdict = demon_action_verdict(cmd, workspace_dir=cwd or os.getcwd())
+                        # Override solo dalla configurazione del server (env), mai dagli argomenti dell'agente
+                        verdict = demon_action_verdict(cmd, workspace_dir=cwd or os.getcwd(),
+                                                       authorized_overrides=overrides_from_env())
                         blocked = None if verdict.allowed else {
                             "command": cmd,
                             "execution_occurred": False,
