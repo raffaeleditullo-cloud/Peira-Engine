@@ -58,6 +58,13 @@ try:
 except ImportError:
     HAS_DEMON = False
 
+# Gate di attuazione DEMON: senza dipendenze esterne, disponibile anche senza DemonGateway
+try:
+    from demon_action_gate import evaluate_command as demon_action_verdict
+    HAS_DEMON_GATE = True
+except ImportError:
+    HAS_DEMON_GATE = False
+
 
 class LivingHexadOrganism:
     """
@@ -167,13 +174,35 @@ class LivingHexadOrganism:
                 audit_log.append("[4. MNEME] Certificato di stabilità asintotica confermato.")
 
             # -------------------------------------------------------------
-            # 5. DEMON: Muscle & Sandbox OS Actuation
+            # 5. DEMON: Gate di attuazione prima dell'esecuzione fisica di PEIRA
             # -------------------------------------------------------------
+            if not HAS_DEMON_GATE:
+                audit_log.append("[5. DEMON] Gate di attuazione non disponibile: esecuzione negata (fail-closed).")
+                return {
+                    "lifecycle_status": "BLOCKED_BY_DEMON",
+                    "reason": "DEMON_GATE_UNAVAILABLE",
+                    "audit_trail": audit_log,
+                    "total_latency_ms": round((time.perf_counter() - start_time) * 1000.0, 3)
+                }
+            verdict = demon_action_verdict(chosen_command, workspace_dir=workspace_dir)
+            if not verdict.allowed:
+                audit_log.append(
+                    f"[5. DEMON] Gate BLOCK su '{chosen_command}': {'; '.join(verdict.reasons)} "
+                    f"(regole: {', '.join(verdict.matched_rules)})"
+                )
+                return {
+                    "lifecycle_status": "BLOCKED_BY_DEMON",
+                    "reason": verdict.reasons,
+                    "matched_rules": verdict.matched_rules,
+                    "audit_trail": audit_log,
+                    "total_latency_ms": round((time.perf_counter() - start_time) * 1000.0, 3)
+                }
+            audit_log.append(f"[5. DEMON] Gate ALLOW ({verdict.latency_ms:.3f} ms)")
+
+            # 5b. DEMON: Muscle & Sandbox OS Actuation (telemetria del gateway)
             if self.demon:
                 demon_res = self.demon.route_command(chosen_command)
                 audit_log.append(f"[5. DEMON] Transizione all'OS Gateway: '{demon_res.get('status')}'")
-            else:
-                audit_log.append(f"[5. DEMON] Barriera balistica autorizzata.")
 
             # -------------------------------------------------------------
             # 6. PEIRA: Physical Silicon Crucible & Friction Delta

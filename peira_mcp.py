@@ -20,6 +20,16 @@ from typing import Dict, Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from peira_engine import PeiraEngine
 
+# Gate di attuazione DEMON dalla cartella sorella: PEIRA misura, DEMON autorizza
+_demon_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Demon-Engine"))
+if os.path.exists(_demon_dir) and _demon_dir not in sys.path:
+    sys.path.insert(0, _demon_dir)
+try:
+    from demon_action_gate import evaluate_command as demon_action_verdict
+    HAS_DEMON_GATE = True
+except ImportError:
+    HAS_DEMON_GATE = False
+
 def create_mcp_response(msg_id, result=None, error=None):
     resp = {"jsonrpc": "2.0", "id": msg_id}
     if error:
@@ -143,6 +153,33 @@ def main():
                 elif tool_name == "peira_execute_sandboxed_trial":
                     cmd = args.get("command", "")
                     cwd = args.get("cwd")
+
+                    # Gate DEMON prima dell'esecuzione fisica (fail-closed se il gate manca)
+                    if not HAS_DEMON_GATE:
+                        blocked = {
+                            "command": cmd,
+                            "execution_occurred": False,
+                            "verdict": "BLOCK",
+                            "reason": "DEMON_GATE_UNAVAILABLE: esecuzione negata (fail-closed)."
+                        }
+                    else:
+                        verdict = demon_action_verdict(cmd, workspace_dir=cwd or os.getcwd())
+                        blocked = None if verdict.allowed else {
+                            "command": cmd,
+                            "execution_occurred": False,
+                            "verdict": verdict.verdict,
+                            "matched_rules": verdict.matched_rules,
+                            "reasons": verdict.reasons,
+                            "mitre_techniques": verdict.mitre_techniques
+                        }
+                    if blocked:
+                        sys.stdout.write(json.dumps(create_mcp_response(msg_id, {
+                            "content": [{"type": "text", "text": json.dumps(blocked, indent=2)}],
+                            "isError": True
+                        })) + "\n")
+                        sys.stdout.flush()
+                        continue
+
                     impact = engine.execute_physical_trial(cmd, cwd=cwd)
                     res = {
                         "command": impact.command,

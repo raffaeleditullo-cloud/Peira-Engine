@@ -6,7 +6,14 @@ traceback dissection, and closed-loop fracture injection generation.
 
 import unittest
 import sys
+import os
+import json
+import subprocess
+import tempfile
+import shutil
+from unittest import mock
 from peira_engine import PeiraEngine, EmpiricalImpact, FractureInjectionPayload
+import peira_hexad_organism
 
 
 class TestPeiraEngine(unittest.TestCase):
@@ -85,6 +92,85 @@ PermissionError: Access denied
         self.assertTrue(res_fail.is_fractured)
         self.assertEqual(res_fail.exit_code, 1)
         self.assertEqual(res_fail.error_type, "ModuleNotFoundError")
+
+
+class TestPeiraDemonGate(unittest.TestCase):
+    """Verifica che ogni ingresso verso PEIRA passi dal gate DEMON (fail-closed)."""
+
+    def setUp(self):
+        self.workspace = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.workspace, ignore_errors=True)
+
+    def _organism(self):
+        organism = peira_hexad_organism.LivingHexadOrganism()
+        organism.demon = None  # Evita la ricerca web del gateway: il gate è indipendente
+        if organism.coris:
+            # Gli anticorpi dei crash di prova restano nel workspace temporaneo, non in Coris-Engine
+            organism.coris = type(organism.coris)(immune_store_path=os.path.join(self.workspace, "immune_memory.json"))
+        return organism
+
+    def _run_organism(self, organism, command):
+        traces = [{"id": "B1", "name": "Trace", "code": command, "entropies": [0.1]}]
+        return organism.execute_hexad_lifecycle(
+            intent_query="Verify gate",
+            workspace_dir=self.workspace,
+            candidate_reasoning_traces=traces,
+            context_conversation=[],
+            max_fracture_retries=0
+        )
+
+    def test_organism_gate_blocks_before_peira(self):
+        """Un comando bloccato da DEMON non raggiunge mai PEIRA nell'organismo."""
+        # Innocuo se eseguito (è solo un echo), ma riconosciuto dal gate come distruzione di database
+        res = self._run_organism(self._organism(), "echo DROP TABLE users")
+        self.assertEqual(res["lifecycle_status"], "BLOCKED_BY_DEMON")
+        self.assertIn("database_destruction", res["matched_rules"])
+        self.assertFalse(any("[6. PEIRA]" in line for line in res["audit_trail"]))
+
+    def test_organism_fail_closed_without_gate(self):
+        """Senza gate l'organismo nega l'esecuzione invece di dichiarare una barriera inesistente."""
+        with mock.patch.object(peira_hexad_organism, "HAS_DEMON_GATE", False):
+            res = self._run_organism(self._organism(), "python -c \"print('ok')\"")
+        self.assertEqual(res["lifecycle_status"], "BLOCKED_BY_DEMON")
+        self.assertEqual(res["reason"], "DEMON_GATE_UNAVAILABLE")
+        self.assertFalse(any("Barriera balistica" in line for line in res["audit_trail"]))
+        self.assertFalse(any("[6. PEIRA]" in line for line in res["audit_trail"]))
+
+    def test_organism_allowed_command_reaches_peira(self):
+        """Un comando ammesso dal gate viene eseguito e misurato da PEIRA."""
+        res = self._run_organism(self._organism(), "python -c \"print('GATE ALLOW OK')\"")
+        self.assertEqual(res["lifecycle_status"], "HEXAD_ABSOLUTE_CONVERGENCE")
+        self.assertIn("GATE ALLOW OK", res["physical_stdout"])
+
+    def _call_mcp_trial(self, command):
+        server = os.path.join(os.path.dirname(os.path.abspath(__file__)), "peira_mcp.py")
+        request = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "peira_execute_sandboxed_trial",
+                       "arguments": {"command": command, "cwd": self.workspace}}
+        }
+        proc = subprocess.run(
+            [sys.executable, server], input=json.dumps(request) + "\n",
+            capture_output=True, text=True, timeout=30
+        )
+        response = json.loads(proc.stdout.strip().splitlines()[0])
+        return response["result"], json.loads(response["result"]["content"][0]["text"])
+
+    def test_mcp_trial_blocked_by_gate(self):
+        """Lo strumento MCP rifiuta i comandi bloccati senza eseguirli."""
+        result, payload = self._call_mcp_trial("echo DROP TABLE users")
+        self.assertTrue(result.get("isError"))
+        self.assertFalse(payload["execution_occurred"])
+        self.assertIn("database_destruction", payload["matched_rules"])
+
+    def test_mcp_trial_allowed_executes(self):
+        """Lo strumento MCP esegue i comandi ammessi dal gate."""
+        result, payload = self._call_mcp_trial("python -c \"print('MCP OK')\"")
+        self.assertNotIn("isError", result)
+        self.assertEqual(payload["exit_code"], 0)
+        self.assertIn("MCP OK", payload["stdout_snippet"])
 
 
 if __name__ == "__main__":
